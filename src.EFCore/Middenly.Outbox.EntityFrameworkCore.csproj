@@ -7,22 +7,19 @@
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
 
-  <!-- NuGet Package Metadata -->
   <PropertyGroup>
-    <PackageId>Middenly.Outbox</PackageId>
+    <PackageId>Middenly.Outbox.EntityFrameworkCore</PackageId>
     <Version>1.0.0</Version>
     <Authors>Middenly</Authors>
     <Company>Middenly</Company>
-    <Description>Transactional Outbox pattern implementation for Confluent.Kafka with PostgreSQL support</Description>
-    <PackageTags>outbox;kafka;confluent;postgresql;messaging;distributed-transactions;microservices</PackageTags>
+    <Description>EF Core integration for Middenly.Outbox - transactional outbox with SaveChanges</Description>
+    <PackageTags>outbox;kafka;efcore;entity-framework;postgresql;messaging;distributed-transactions</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/Middenly/Middenly.Outbox</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Middenly/Middenly.Outbox</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
-  <!-- Source Link for debugging -->
   <PropertyGroup>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
@@ -32,13 +29,13 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Confluent.Kafka" Version="2.10.0" />
-    <PackageReference Include="Npgsql" Version="9.0.3" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.0-preview.5.25277.114" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0-preview.5.25277.114" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0-preview.5.25277.114" />
-    <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.0-preview.5.25277.114" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.0-preview.5.25277.114" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.0-preview.5.25277.114" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\src\Middenly.Outbox.csproj" />
   </ItemGroup>
 
 </Project>

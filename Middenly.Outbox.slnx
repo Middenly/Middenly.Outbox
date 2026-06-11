@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src.EFCore/">
+    <Project Path="src.EFCore/Middenly.Outbox.EntityFrameworkCore.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Middenly.Outbox.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Middenly.Outbox.Tests/Middenly.Outbox.Tests.csproj" />
+  </Folder>
+</Solution>
