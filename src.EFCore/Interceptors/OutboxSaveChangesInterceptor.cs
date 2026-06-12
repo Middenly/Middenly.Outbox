@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Runtime.CompilerServices;
 using Middenly.Outbox.Abstractions;
 using Middenly.Outbox.Configuration;
 using Middenly.Outbox.Dispatcher;
@@ -12,13 +11,15 @@ using Microsoft.Extensions.Options;
 
 namespace Middenly.Outbox.EntityFrameworkCore.Interceptors;
 
-public sealed class OutboxSaveChangesInterceptor : SaveChangesInterceptor
+public sealed class OutboxSaveChangesInterceptor : SaveChangesInterceptor, IDisposable, IAsyncDisposable
 {
-    private readonly ConditionalWeakTable<DbContext, OwnedTransaction> _ownedTransactions = new();
+    private readonly object _transactionLock = new();
+    private readonly Dictionary<DbContext, OwnedTransaction> _ownedTransactions = new();
     private readonly IOutboxStore _store;
     private readonly OutboxDispatcher? _dispatcher;
     private readonly OutboxOptions _options;
     private readonly ILogger<OutboxSaveChangesInterceptor> _logger;
+    private bool _disposed;
 
     public OutboxSaveChangesInterceptor(
         IOutboxStore store,
@@ -124,20 +125,20 @@ public sealed class OutboxSaveChangesInterceptor : SaveChangesInterceptor
 
     private void EnsureOwnedTransaction(DbContext context)
     {
-        if (context.Database.CurrentTransaction is not null || _ownedTransactions.TryGetValue(context, out _))
+        if (context.Database.CurrentTransaction is not null || HasOwnedTransaction(context))
             return;
 
         var transaction = context.Database.BeginTransaction();
-        _ownedTransactions.Add(context, new OwnedTransaction(transaction));
+        AddOwnedTransaction(context, transaction);
     }
 
     private async Task EnsureOwnedTransactionAsync(DbContext context, CancellationToken cancellationToken)
     {
-        if (context.Database.CurrentTransaction is not null || _ownedTransactions.TryGetValue(context, out _))
+        if (context.Database.CurrentTransaction is not null || HasOwnedTransaction(context))
             return;
 
         var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
-        _ownedTransactions.Add(context, new OwnedTransaction(transaction));
+        AddOwnedTransaction(context, transaction);
     }
 
     private void StoreMessages(DbContext context, IReadOnlyCollection<OutboxMessage> messages)
@@ -205,7 +206,7 @@ public sealed class OutboxSaveChangesInterceptor : SaveChangesInterceptor
 
     private void CommitOwnedTransaction(DbContext? context)
     {
-        if (context is null || !_ownedTransactions.TryGetValue(context, out var owned))
+        if (context is null || !TryRemoveOwnedTransaction(context, out var owned))
             return;
 
         try
@@ -214,14 +215,13 @@ public sealed class OutboxSaveChangesInterceptor : SaveChangesInterceptor
         }
         finally
         {
-            _ownedTransactions.Remove(context);
             owned.Transaction.Dispose();
         }
     }
 
     private async Task CommitOwnedTransactionAsync(DbContext? context, CancellationToken cancellationToken)
     {
-        if (context is null || !_ownedTransactions.TryGetValue(context, out var owned))
+        if (context is null || !TryRemoveOwnedTransaction(context, out var owned))
             return;
 
         try
@@ -230,14 +230,13 @@ public sealed class OutboxSaveChangesInterceptor : SaveChangesInterceptor
         }
         finally
         {
-            _ownedTransactions.Remove(context);
             await owned.Transaction.DisposeAsync();
         }
     }
 
     private void RollbackOwnedTransaction(DbContext? context)
     {
-        if (context is null || !_ownedTransactions.TryGetValue(context, out var owned))
+        if (context is null || !TryRemoveOwnedTransaction(context, out var owned))
             return;
 
         try
@@ -246,14 +245,13 @@ public sealed class OutboxSaveChangesInterceptor : SaveChangesInterceptor
         }
         finally
         {
-            _ownedTransactions.Remove(context);
             owned.Transaction.Dispose();
         }
     }
 
     private async Task RollbackOwnedTransactionAsync(DbContext? context, CancellationToken cancellationToken)
     {
-        if (context is null || !_ownedTransactions.TryGetValue(context, out var owned))
+        if (context is null || !TryRemoveOwnedTransaction(context, out var owned))
             return;
 
         try
@@ -262,14 +260,84 @@ public sealed class OutboxSaveChangesInterceptor : SaveChangesInterceptor
         }
         finally
         {
-            _ownedTransactions.Remove(context);
             await owned.Transaction.DisposeAsync();
+        }
+    }
+
+    private bool HasOwnedTransaction(DbContext context)
+    {
+        lock (_transactionLock)
+        {
+            return _ownedTransactions.ContainsKey(context);
+        }
+    }
+
+    private void AddOwnedTransaction(DbContext context, IDbContextTransaction transaction)
+    {
+        lock (_transactionLock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _ownedTransactions.Add(context, new OwnedTransaction(transaction));
+        }
+    }
+
+    private bool TryRemoveOwnedTransaction(DbContext context, out OwnedTransaction owned)
+    {
+        lock (_transactionLock)
+        {
+            if (!_ownedTransactions.Remove(context, out owned!))
+            {
+                return false;
+            }
+
+            return true;
+        }
+    }
+
+    private List<OwnedTransaction> DrainOwnedTransactions()
+    {
+        lock (_transactionLock)
+        {
+            _disposed = true;
+            var transactions = _ownedTransactions.Values.ToList();
+            _ownedTransactions.Clear();
+            return transactions;
         }
     }
 
     private void NotifyDispatcher()
     {
         _dispatcher?.NotifyNewMessage();
+    }
+
+    public void Dispose()
+    {
+        foreach (var owned in DrainOwnedTransactions())
+        {
+            try
+            {
+                owned.Transaction.Rollback();
+            }
+            finally
+            {
+                owned.Transaction.Dispose();
+            }
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        foreach (var owned in DrainOwnedTransactions())
+        {
+            try
+            {
+                await owned.Transaction.RollbackAsync();
+            }
+            finally
+            {
+                await owned.Transaction.DisposeAsync();
+            }
+        }
     }
 
     private sealed class OwnedTransaction

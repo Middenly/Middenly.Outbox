@@ -14,7 +14,7 @@ public static class EfCoreOutboxServiceCollectionExtensions
         where TDbContext : DbContext
     {
         builder.Services.TryAddScoped<EfCoreOutbox>();
-        builder.Services.TryAddSingleton<OutboxSaveChangesInterceptor>();
+        builder.Services.TryAddScoped<OutboxSaveChangesInterceptor>();
 
         // Replace IOutbox: singleton → scoped (EfCoreOutbox)
         var existing = builder.Services.FirstOrDefault(d => d.ServiceType == typeof(IOutbox));
