@@ -30,7 +30,7 @@ builder.Services.AddOutbox(options =>
 | `BatchSize` | `int` | `100` | Maximum number of messages to read from the database per polling cycle |
 | `PollingInterval` | `TimeSpan` | `5 seconds` | How often the dispatcher polls for new messages |
 | `MaxAttempts` | `int` | `5` | Maximum delivery attempts before moving to dead letter queue |
-| `RetryDelay` | `TimeSpan` | `30 seconds` | Minimum delay between retry attempts |
+| `RetryDelay` | `TimeSpan` | `30 seconds` | Minimum time a failed message stays in `Failed` before it becomes eligible for retry |
 | `EnableDeadLetter` | `bool` | `true` | Whether to move permanently failed messages to the dead letter queue |
 | `CleanupInterval` | `TimeSpan?` | `null` | How often to run cleanup (null = disabled) |
 | `MessageRetention` | `TimeSpan` | `7 days` | How long to keep completed/dead-lettered messages before cleanup |
@@ -77,6 +77,8 @@ options.MaxAttempts = 10;
 options.RetryDelay = TimeSpan.FromSeconds(10);
 options.EnableDeadLetter = true;
 ```
+
+Failed messages remain visible with `status = 3` while waiting for `RetryDelay`. When the delay expires, the dispatcher picks them up again and marks them `InProgress`. If `EnableDeadLetter = false`, messages that reach `MaxAttempts` remain terminally `Failed` until an operator replays or deletes them.
 
 ## KafkaOutboxOptions
 
