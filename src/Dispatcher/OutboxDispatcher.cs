@@ -189,10 +189,14 @@ public sealed class OutboxDispatcher : BackgroundService
                 }
                 else
                 {
-                    await _store.MarkFailedAsync(
+                    await _store.MarkTerminalFailedAsync(
                         message.Id,
                         $"Max attempts ({maxAttempts}) exceeded",
                         cancellationToken);
+
+                    _logger.LogWarning(
+                        "Message {MessageId} exceeded max attempts, left in failed state because dead letter queue is disabled",
+                        message.Id);
                 }
 
                 return;

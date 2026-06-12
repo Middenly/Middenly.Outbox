@@ -26,9 +26,9 @@ CREATE SCHEMA IF NOT EXISTS "public";
 
 CREATE TABLE IF NOT EXISTS "public"."outbox_messages" (
     id UUID PRIMARY KEY,
-    topic VARCHAR(500) NOT NULL,
+    destination VARCHAR(500) NOT NULL,
     key BYTEA,
-    value BYTEA NOT NULL,
+    body BYTEA NOT NULL,
     headers JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deliver_after TIMESTAMPTZ,
@@ -39,15 +39,15 @@ CREATE TABLE IF NOT EXISTS "public"."outbox_messages" (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Index for efficient polling of pending messages
+-- Index for efficient polling of pending and retryable failed messages
 CREATE INDEX IF NOT EXISTS idx_outbox_messages_status_created
     ON "public"."outbox_messages" (status, created_at)
-    WHERE status = 0;
+    WHERE status IN (0, 3);
 
--- Index for delayed delivery
+-- Index for delayed delivery and retry backoff
 CREATE INDEX IF NOT EXISTS idx_outbox_messages_status_deliver
     ON "public"."outbox_messages" (status, deliver_after)
-    WHERE status = 0;
+    WHERE status IN (0, 3);
 
 -- Index for cleanup of completed/dead-lettered messages
 CREATE INDEX IF NOT EXISTS idx_outbox_messages_cleanup
@@ -78,14 +78,23 @@ UPDATE outbox_messages
 SET status = 1, updated_at = NOW()
 WHERE id IN (
     SELECT id FROM outbox_messages
-    WHERE status = 0
-      AND (deliver_after IS NULL OR deliver_after <= NOW())
+    WHERE (
+        status = 0
+        AND (deliver_after IS NULL OR deliver_after <= NOW())
+      )
+      OR (
+        status = 3
+        AND deliver_after IS NOT NULL
+        AND deliver_after <= NOW()
+      )
     ORDER BY created_at
     LIMIT @batch_size
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id, topic, key, value, headers, created_at, deliver_after, attempts, status, last_error, partition;
+RETURNING id, destination, key, body, headers, created_at, deliver_after, attempts, status, last_error, partition;
 ```
+
+`Failed` messages use `deliver_after` as the next retry time. If dead lettering is disabled and a message reaches `MaxAttempts`, it remains terminally `Failed` with `deliver_after = NULL` and is no longer selected by polling.
 
 ### Why FOR UPDATE SKIP LOCKED?
 
@@ -124,8 +133,8 @@ options.BatchSize = 50;  // Low latency
 ### Indexes
 
 The automatically created indexes cover:
-- **Polling**: `(status, created_at) WHERE status = 0` — fast lookup of pending messages
-- **Delayed delivery**: `(status, deliver_after) WHERE status = 0` — fast lookup of messages ready for delivery
+- **Polling**: `(status, created_at) WHERE status IN (0, 3)` — fast lookup of pending and retryable failed messages
+- **Delayed delivery/retry**: `(status, deliver_after) WHERE status IN (0, 3)` — fast lookup of messages ready for delivery or retry
 - **Cleanup**: `(status, updated_at) WHERE status IN (2, 4)` — fast cleanup of completed messages
 
 ### Connection Pooling

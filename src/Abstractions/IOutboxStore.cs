@@ -12,6 +12,8 @@ public interface IOutboxStore
 
     Task MarkFailedAsync(Guid messageId, string error, CancellationToken cancellationToken = default);
 
+    Task MarkTerminalFailedAsync(Guid messageId, string error, CancellationToken cancellationToken = default);
+
     Task MoveToDeadLetterAsync(Guid messageId, string error, CancellationToken cancellationToken = default);
 
     Task<int> RecoverStuckMessagesAsync(

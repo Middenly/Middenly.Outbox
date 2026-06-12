@@ -196,11 +196,126 @@ public class PostgresOutboxStoreTests : IAsyncLifetime
         await _store.MarkFailedAsync(pending[0].Id, "test error");
 
         // Assert
-        // The message should be back to failed status with incremented attempts
-        // We need to check directly since GetPendingAsync only returns Pending messages
-        var allPending = await _store.GetPendingAsync(10);
-        // Failed messages are not returned by GetPendingAsync (they have status Failed, not Pending)
-        // But we can store another and verify the first one is not returned
+        var stored = await ReadStoredMessageAsync(message.Id);
+        stored.Status.Should().Be(OutboxMessageStatus.Failed);
+        stored.Attempts.Should().Be(1);
+        stored.LastError.Should().Be("test error");
+        stored.DeliverAfter.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task GetPendingAsync_FailedBeforeRetryDelay_ShouldNotReturnMessage()
+    {
+        // Arrange
+        var options = Options.Create(new OutboxOptions
+        {
+            TableName = "outbox_messages",
+            SchemaName = "public",
+            RetryDelay = TimeSpan.FromHours(1)
+        });
+        var retryStore = new PostgresOutboxStore(
+            _postgres.GetConnectionString(),
+            options,
+            LoggerFactory.Create(builder => builder.AddConsole()).CreateLogger<PostgresOutboxStore>());
+
+        var message = CreateTestMessage("test-topic");
+        await retryStore.StoreAsync(message);
+        var pending = await retryStore.GetPendingAsync(10);
+        await retryStore.MarkFailedAsync(pending[0].Id, "temporary failure");
+
+        // Act
+        var retryable = await retryStore.GetPendingAsync(10);
+
+        // Assert
+        retryable.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task GetPendingAsync_FailedAfterRetryDelay_ShouldReturnMessage()
+    {
+        // Arrange
+        var options = Options.Create(new OutboxOptions
+        {
+            TableName = "outbox_messages",
+            SchemaName = "public",
+            RetryDelay = TimeSpan.Zero
+        });
+        var retryStore = new PostgresOutboxStore(
+            _postgres.GetConnectionString(),
+            options,
+            LoggerFactory.Create(builder => builder.AddConsole()).CreateLogger<PostgresOutboxStore>());
+
+        var message = CreateTestMessage("test-topic");
+        await retryStore.StoreAsync(message);
+        var pending = await retryStore.GetPendingAsync(10);
+        await retryStore.MarkFailedAsync(pending[0].Id, "temporary failure");
+
+        // Act
+        var retryable = await retryStore.GetPendingAsync(10);
+
+        // Assert
+        retryable.Should().HaveCount(1);
+        retryable[0].Id.Should().Be(message.Id);
+        retryable[0].Attempts.Should().Be(1);
+        retryable[0].Status.Should().Be(OutboxMessageStatus.InProgress);
+    }
+
+    [Fact]
+    public async Task ConcurrentGetPending_WithRetryableFailedMessages_ShouldNotReturnDuplicates()
+    {
+        // Arrange
+        var options = Options.Create(new OutboxOptions
+        {
+            TableName = "outbox_messages",
+            SchemaName = "public",
+            RetryDelay = TimeSpan.Zero
+        });
+        var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        var store1 = new PostgresOutboxStore(
+            _postgres.GetConnectionString(), options, loggerFactory.CreateLogger<PostgresOutboxStore>());
+        var store2 = new PostgresOutboxStore(
+            _postgres.GetConnectionString(), options, loggerFactory.CreateLogger<PostgresOutboxStore>());
+
+        for (int i = 0; i < 20; i++)
+        {
+            var message = CreateTestMessage($"topic{i}");
+            await store1.StoreAsync(message);
+            var pending = await store1.GetPendingAsync(1);
+            await store1.MarkFailedAsync(pending[0].Id, "temporary failure");
+        }
+
+        // Act
+        var task1 = store1.GetPendingAsync(15);
+        var task2 = store2.GetPendingAsync(15);
+        await Task.WhenAll(task1, task2);
+
+        var messages1 = await task1;
+        var messages2 = await task2;
+
+        // Assert
+        var allIds = messages1.Select(m => m.Id).Concat(messages2.Select(m => m.Id)).ToList();
+        allIds.Should().OnlyHaveUniqueItems();
+        allIds.Should().HaveCount(20);
+    }
+
+    [Fact]
+    public async Task MarkTerminalFailedAsync_ShouldLeaveFailedMessageOutOfPolling()
+    {
+        // Arrange
+        var message = CreateTestMessage("test-topic");
+        await _store.StoreAsync(message);
+        var pending = await _store.GetPendingAsync(10);
+
+        // Act
+        await _store.MarkTerminalFailedAsync(pending[0].Id, "max attempts exceeded");
+
+        // Assert
+        var stored = await ReadStoredMessageAsync(message.Id);
+        stored.Status.Should().Be(OutboxMessageStatus.Failed);
+        stored.DeliverAfter.Should().BeNull();
+
+        var retryable = await _store.GetPendingAsync(10);
+        retryable.Should().BeEmpty();
     }
 
     [Fact]
@@ -448,6 +563,42 @@ public class PostgresOutboxStoreTests : IAsyncLifetime
             DeliverAfter = deliverAfter,
             CreatedAt = createdAt ?? DateTimeOffset.UtcNow,
             Partition = partition
+        };
+    }
+
+    private async Task<OutboxMessage> ReadStoredMessageAsync(Guid id)
+    {
+        await using var connection = new Npgsql.NpgsqlConnection(_postgres.GetConnectionString());
+        await connection.OpenAsync();
+
+        await using var cmd = new Npgsql.NpgsqlCommand(
+            "SELECT id, destination, key, body, headers, created_at, deliver_after, attempts, status, last_error, partition FROM outbox_messages WHERE id = @id",
+            connection);
+        cmd.Parameters.AddWithValue("id", id);
+
+        await using var reader = await cmd.ExecuteReaderAsync();
+        (await reader.ReadAsync()).Should().BeTrue();
+
+        return new OutboxMessage
+        {
+            Id = reader.GetGuid(reader.GetOrdinal("id")),
+            Destination = reader.GetString(reader.GetOrdinal("destination")),
+            Key = reader.IsDBNull(reader.GetOrdinal("key"))
+                ? null
+                : (byte[])reader.GetValue(reader.GetOrdinal("key")),
+            Body = (byte[])reader.GetValue(reader.GetOrdinal("body")),
+            CreatedAt = new DateTimeOffset(reader.GetDateTime(reader.GetOrdinal("created_at")), TimeSpan.Zero),
+            DeliverAfter = reader.IsDBNull(reader.GetOrdinal("deliver_after"))
+                ? null
+                : new DateTimeOffset(reader.GetDateTime(reader.GetOrdinal("deliver_after")), TimeSpan.Zero),
+            Attempts = reader.GetInt32(reader.GetOrdinal("attempts")),
+            Status = (OutboxMessageStatus)reader.GetInt16(reader.GetOrdinal("status")),
+            LastError = reader.IsDBNull(reader.GetOrdinal("last_error"))
+                ? null
+                : reader.GetString(reader.GetOrdinal("last_error")),
+            Partition = reader.IsDBNull(reader.GetOrdinal("partition"))
+                ? null
+                : reader.GetInt32(reader.GetOrdinal("partition"))
         };
     }
 }
