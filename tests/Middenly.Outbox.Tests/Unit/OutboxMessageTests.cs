@@ -11,18 +11,21 @@ public class OutboxMessageTests
     public void NewMessage_ShouldHaveDefaultValues()
     {
         // Arrange & Act
+        var beforeCreate = DateTimeOffset.UtcNow;
         var message = new OutboxMessage
         {
             Destination = "test-topic",
             Body = Encoding.UTF8.GetBytes("test")
         };
+        var afterCreate = DateTimeOffset.UtcNow;
 
         // Assert
         message.Id.Should().NotBeEmpty();
         message.Destination.Should().Be("test-topic");
         message.Status.Should().Be(OutboxMessageStatus.Pending);
         message.Attempts.Should().Be(0);
-        message.CreatedAt.Should().BeCloseTo(DateTimeOffset.UtcNow, TimeSpan.FromSeconds(1));
+        message.CreatedAt.Should().BeOnOrAfter(beforeCreate);
+        message.CreatedAt.Should().BeOnOrBefore(afterCreate);
         message.DeliverAfter.Should().BeNull();
         message.LastError.Should().BeNull();
         message.Key.Should().BeNull();

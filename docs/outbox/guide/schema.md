@@ -9,12 +9,12 @@ Middenly.Outbox automatically creates and manages the PostgreSQL schema. This pa
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
 | `id` | `UUID` | No | `gen_random_uuid()` | Unique message identifier |
-| `topic` | `VARCHAR(500)` | No | — | Kafka topic name |
+| `destination` | `VARCHAR(500)` | No | - | Kafka topic or destination name |
 | `key` | `BYTEA` | Yes | `NULL` | Kafka message key (for partition affinity) |
-| `value` | `BYTEA` | No | — | Serialized message body |
+| `body` | `BYTEA` | No | - | Serialized message body |
 | `headers` | `JSONB` | Yes | `NULL` | Message headers as JSON |
 | `created_at` | `TIMESTAMPTZ` | No | `NOW()` | When the message was created |
-| `deliver_after` | `TIMESTAMPTZ` | Yes | `NULL` | When the message is eligible for delivery |
+| `deliver_after` | `TIMESTAMPTZ` | Yes | `NULL` | When a pending or failed message is eligible for delivery/retry |
 | `attempts` | `INT` | No | `0` | Number of delivery attempts |
 | `status` | `SMALLINT` | No | `0` | Message status (see below) |
 | `last_error` | `TEXT` | Yes | `NULL` | Last error message |
@@ -25,17 +25,17 @@ Middenly.Outbox automatically creates and manages the PostgreSQL schema. This pa
 
 The following status transitions are enforced:
 
-```
-Pending (0) → InProgress (1)   [GetPendingAsync - automatic]
-InProgress (1) → Completed (2) [MarkCompletedAsync - guarded]
-InProgress (1) → Failed (3)    [MarkFailedAsync - guarded]
-InProgress (1) → DeadLettered (4) [MoveToDeadLetterAsync - guarded]
-InProgress (1) → Pending (0)   [RecoverStuckMessagesAsync - automatic]
-Failed (3) → Pending (0)       [GetPendingAsync - on next poll]
+```text
+Pending (0) -> InProgress (1)       [GetPendingAsync - automatic]
+InProgress (1) -> Completed (2)     [MarkCompletedAsync - guarded]
+InProgress (1) -> Failed (3)        [MarkFailedAsync - guarded]
+InProgress (1) -> DeadLettered (4)  [MoveToDeadLetterAsync - guarded]
+InProgress (1) -> Pending (0)       [RecoverStuckMessagesAsync - automatic]
+Failed (3) -> InProgress (1)        [GetPendingAsync - after RetryDelay]
 ```
 
 ::: warning
-`MarkCompletedAsync`, `MarkFailedAsync`, and `MoveToDeadLetterAsync` only update messages that are currently in `InProgress` status. This prevents race conditions in multi-instance deployments where two instances may try to act on the same message.
+`MarkCompletedAsync`, `MarkFailedAsync`, `MarkTerminalFailedAsync`, and `MoveToDeadLetterAsync` only update messages that are currently in `InProgress` status. This prevents race conditions in multi-instance deployments where two instances may try to act on the same message.
 :::
 
 | Value | Name | Description |
@@ -43,7 +43,7 @@ Failed (3) → Pending (0)       [GetPendingAsync - on next poll]
 | `0` | Pending | Waiting for delivery |
 | `1` | InProgress | Currently being delivered |
 | `2` | Completed | Successfully delivered |
-| `3` | Failed | Delivery failed, will retry |
+| `3` | Failed | Delivery failed; retryable when `deliver_after` is due, or terminal when `deliver_after` is `NULL` |
 | `4` | DeadLettered | Max attempts exceeded |
 
 ## Indexes
@@ -53,20 +53,20 @@ Failed (3) → Pending (0)       [GetPendingAsync - on next poll]
 ```sql
 CREATE INDEX idx_outbox_messages_status_created
     ON outbox_messages (status, created_at)
-    WHERE status = 0;
+    WHERE status IN (0, 3);
 ```
 
-Used by `GetPendingAsync()` to efficiently find pending messages ordered by creation time.
+Used by `GetPendingAsync()` to efficiently find pending and retryable failed messages ordered by creation time.
 
 ### `idx_outbox_messages_status_deliver`
 
 ```sql
 CREATE INDEX idx_outbox_messages_status_deliver
     ON outbox_messages (status, deliver_after)
-    WHERE status = 0;
+    WHERE status IN (0, 3);
 ```
 
-Used to efficiently find messages with delayed delivery that are now eligible.
+Used to efficiently find delayed pending messages and failed messages whose retry delay has elapsed.
 
 ### `idx_outbox_messages_cleanup`
 
@@ -108,4 +108,4 @@ This creates the table at `messaging.kafka_outbox`.
 
 ## Manual Schema Creation
 
-If you prefer to manage the schema yourself (e.g., for migration tools), you can disable auto-initialization and run the SQL manually. The exact SQL is shown in the [PostgreSQL Store](/guide/postgresql#automatic-schema-management) section.
+If you prefer to manage the schema yourself, run SQL equivalent to the automatic schema shown in the PostgreSQL guide.

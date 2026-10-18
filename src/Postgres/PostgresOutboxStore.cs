@@ -52,11 +52,11 @@ public sealed class PostgresOutboxStore : IOutboxStore
 
             CREATE INDEX IF NOT EXISTS idx_{_options.TableName}_status_created
                 ON {_tableName} (status, created_at)
-                WHERE status = 0;
+                WHERE status IN (0, 3);
 
             CREATE INDEX IF NOT EXISTS idx_{_options.TableName}_status_deliver
                 ON {_tableName} (status, deliver_after)
-                WHERE status = 0;
+                WHERE status IN (0, 3);
 
             CREATE INDEX IF NOT EXISTS idx_{_options.TableName}_cleanup
                 ON {_tableName} (status, updated_at)
@@ -114,8 +114,15 @@ public sealed class PostgresOutboxStore : IOutboxStore
             SET status = @in_progress, updated_at = NOW()
             WHERE id IN (
                 SELECT id FROM {_tableName}
-                WHERE status = @pending
-                  AND (deliver_after IS NULL OR deliver_after <= NOW())
+                WHERE (
+                    status = @pending
+                    AND (deliver_after IS NULL OR deliver_after <= NOW())
+                  )
+                  OR (
+                    status = @failed
+                    AND deliver_after IS NOT NULL
+                    AND deliver_after <= NOW()
+                  )
                 ORDER BY created_at
                 LIMIT @batch_size
                 FOR UPDATE SKIP LOCKED
@@ -125,6 +132,7 @@ public sealed class PostgresOutboxStore : IOutboxStore
 
         await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.Add("pending", NpgsqlDbType.Smallint).Value = (short)OutboxMessageStatus.Pending;
+        cmd.Parameters.Add("failed", NpgsqlDbType.Smallint).Value = (short)OutboxMessageStatus.Failed;
         cmd.Parameters.Add("in_progress", NpgsqlDbType.Smallint).Value = (short)OutboxMessageStatus.InProgress;
         cmd.Parameters.Add("batch_size", NpgsqlDbType.Integer).Value = batchSize;
 
@@ -165,7 +173,35 @@ public sealed class PostgresOutboxStore : IOutboxStore
 
         var sql = $"""
             UPDATE {_tableName}
-            SET status = @status, attempts = attempts + 1, last_error = @error, updated_at = NOW()
+            SET status = @status,
+                attempts = attempts + 1,
+                last_error = @error,
+                deliver_after = @deliver_after,
+                updated_at = NOW()
+            WHERE id = @id AND status = @expected_status
+            """;
+
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.Add("id", NpgsqlDbType.Uuid).Value = messageId;
+        cmd.Parameters.Add("status", NpgsqlDbType.Smallint).Value = (short)OutboxMessageStatus.Failed;
+        cmd.Parameters.Add("expected_status", NpgsqlDbType.Smallint).Value = (short)OutboxMessageStatus.InProgress;
+        cmd.Parameters.Add("error", NpgsqlDbType.Text).Value = error;
+        cmd.Parameters.Add("deliver_after", NpgsqlDbType.TimestampTz).Value = DateTimeOffset.UtcNow.Add(_options.RetryDelay).UtcDateTime;
+
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task MarkTerminalFailedAsync(Guid messageId, string error, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var sql = $"""
+            UPDATE {_tableName}
+            SET status = @status,
+                last_error = @error,
+                deliver_after = NULL,
+                updated_at = NOW()
             WHERE id = @id AND status = @expected_status
             """;
 
